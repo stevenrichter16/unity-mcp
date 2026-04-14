@@ -25,6 +25,7 @@ TOOL_GROUPS: dict[str, str] = {
     "testing": "Test runner & async test jobs",
     "probuilder": "ProBuilder 3D modeling – requires com.unity.probuilder package",
     "profiling": "Unity Profiler session control, counters, memory snapshots & Frame Debugger",
+    "gameplay": "Play Mode input simulation & gameplay automation",
 }
 
 DEFAULT_ENABLED_GROUPS: set[str] = {"core"}
