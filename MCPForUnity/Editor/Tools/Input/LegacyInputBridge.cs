@@ -30,9 +30,9 @@ namespace MCPForUnity.Editor.Tools.Input
         {
             if (state == PlayModeStateChange.EnteredPlayMode)
             {
-                // Only inject bridge if New Input System is NOT available (legacy fallback)
-                if (!InputSimulator.IsAvailable)
-                    EnsureBridgeExists();
+                // Always inject bridge — it handles both New Input System (re-queuing state
+                // every frame) and legacy input fallback
+                EnsureBridgeExists();
             }
         }
 

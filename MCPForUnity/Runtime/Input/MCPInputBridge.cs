@@ -1,35 +1,55 @@
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using UnityEngine;
 
 namespace MCPForUnity.Runtime.Input
 {
     /// <summary>
-    /// Runtime MonoBehaviour that processes input commands queued by the Editor-side MCP tools.
-    /// Auto-injected into the scene when Play Mode starts (if legacy input fallback is needed).
-    /// Hidden from the Hierarchy and not saved with the scene.
+    /// Runtime MonoBehaviour that processes input commands and continuously re-applies
+    /// virtual key/mouse state every frame via the New Input System's QueueStateEvent.
+    /// This ensures simulated input persists across frames (QueueStateEvent is single-frame
+    /// by design — the bridge re-queues each frame to maintain held state).
+    /// Auto-injected into the scene when Play Mode starts.
     /// </summary>
     public class MCPInputBridge : MonoBehaviour
     {
-        /// <summary>
-        /// Thread-safe command queue. Editor tools enqueue commands; this bridge dequeues and processes them in Update().
-        /// Static so it survives domain reload if "Reload Domain" is disabled.
-        /// </summary>
         public static readonly ConcurrentQueue<InputCommand> CommandQueue = new ConcurrentQueue<InputCommand>();
 
-        /// <summary>Current virtual key states (for legacy input tracking).</summary>
-        private static readonly ConcurrentDictionary<KeyCode, bool> _keyStates = new ConcurrentDictionary<KeyCode, bool>();
-
-        /// <summary>Current virtual mouse position.</summary>
-        public static Vector2 VirtualMousePosition { get; private set; }
-
-        /// <summary>Current virtual mouse button states.</summary>
+        // Persistent virtual state — survives across frames
+        private static readonly ConcurrentDictionary<int, bool> _keyStates = new ConcurrentDictionary<int, bool>();
         private static readonly bool[] _mouseButtonStates = new bool[3];
+        private static Vector2 _mousePosition;
+        private static bool _mousePositionSet;
+        private static Vector2 _scrollDelta;
+        private static bool _scrollPending;
+
+        // New Input System types resolved via reflection
+        private static System.Type _keyboardType;
+        private static System.Type _mouseType;
+        private static System.Type _inputSystemType;
+        private static System.Type _keyboardStateType;
+        private static System.Type _mouseStateType;
+        private static System.Type _keyEnum;
+        private static System.Type _mouseButtonEnum;
+        private static MethodInfo _queueStateEventMethod;
+        private static MethodInfo _keyboardStateSetMethod;
+        private static MethodInfo _mouseStateWithButtonMethod;
+        private static PropertyInfo _keyboardCurrentProp;
+        private static PropertyInfo _mouseCurrentProp;
+        private static FieldInfo _mousePositionField;
+        private static FieldInfo _mouseScrollField;
+        private static bool _typesResolved;
+        private static bool _newInputSystemAvailable;
 
         public static bool IsActive { get; private set; }
 
         private void OnEnable()
         {
             IsActive = true;
+            ResolveTypes();
+            ConfigureInputSettings();
         }
 
         private void OnDisable()
@@ -43,13 +63,102 @@ namespace MCPForUnity.Runtime.Input
             ClearState();
         }
 
+        private static void ResolveTypes()
+        {
+            if (_typesResolved) return;
+            _typesResolved = true;
+
+            _inputSystemType = System.Type.GetType("UnityEngine.InputSystem.InputSystem, Unity.InputSystem");
+            _keyboardType = System.Type.GetType("UnityEngine.InputSystem.Keyboard, Unity.InputSystem");
+            _mouseType = System.Type.GetType("UnityEngine.InputSystem.Mouse, Unity.InputSystem");
+            _keyboardStateType = System.Type.GetType("UnityEngine.InputSystem.LowLevel.KeyboardState, Unity.InputSystem");
+            _mouseStateType = System.Type.GetType("UnityEngine.InputSystem.LowLevel.MouseState, Unity.InputSystem");
+            _keyEnum = System.Type.GetType("UnityEngine.InputSystem.Key, Unity.InputSystem");
+            _mouseButtonEnum = System.Type.GetType("UnityEngine.InputSystem.LowLevel.MouseButton, Unity.InputSystem");
+
+            if (_inputSystemType == null) return;
+
+            _keyboardCurrentProp = _keyboardType?.GetProperty("current", BindingFlags.Public | BindingFlags.Static);
+            _mouseCurrentProp = _mouseType?.GetProperty("current", BindingFlags.Public | BindingFlags.Static);
+
+            if (_keyboardStateType != null && _keyEnum != null)
+                _keyboardStateSetMethod = _keyboardStateType.GetMethod("Set", new[] { _keyEnum, typeof(bool) });
+
+            if (_mouseStateType != null)
+            {
+                _mousePositionField = _mouseStateType.GetField("position");
+                _mouseScrollField = _mouseStateType.GetField("scroll");
+                if (_mouseButtonEnum != null)
+                    _mouseStateWithButtonMethod = _mouseStateType.GetMethod("WithButton", new[] { _mouseButtonEnum, typeof(bool) });
+            }
+
+            // Find QueueStateEvent generic method
+            var queueMethods = _inputSystemType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Where(m => m.Name == "QueueStateEvent" && m.IsGenericMethod);
+            foreach (var method in queueMethods)
+            {
+                var p = method.GetParameters();
+                if (p.Length >= 2 && !p[1].ParameterType.IsByRef)
+                {
+                    _queueStateEventMethod = method;
+                    break;
+                }
+            }
+
+            _newInputSystemAvailable = _queueStateEventMethod != null
+                && _keyboardStateType != null
+                && _keyboardStateSetMethod != null;
+        }
+
+        /// <summary>
+        /// Configure Input System to accept input even when Game View isn't focused.
+        /// </summary>
+        private static void ConfigureInputSettings()
+        {
+            if (_inputSystemType == null) return;
+            try
+            {
+                var settingsProp = _inputSystemType.GetProperty("settings", BindingFlags.Public | BindingFlags.Static);
+                if (settingsProp == null) return;
+                var settings = settingsProp.GetValue(null);
+                if (settings == null) return;
+
+                // Set editorInputBehaviorInPlayMode = AllDeviceInputAlwaysGoesToGameView (2)
+                var editorBehaviorProp = settings.GetType().GetProperty("editorInputBehaviorInPlayMode");
+                if (editorBehaviorProp != null)
+                {
+                    var enumType = editorBehaviorProp.PropertyType;
+                    var allDevices = System.Enum.Parse(enumType, "AllDeviceInputAlwaysGoesToGameView");
+                    editorBehaviorProp.SetValue(settings, allDevices);
+                }
+
+                // Set backgroundBehavior = IgnoreFocus (1)
+                var bgBehaviorProp = settings.GetType().GetProperty("backgroundBehavior");
+                if (bgBehaviorProp != null)
+                {
+                    var enumType = bgBehaviorProp.PropertyType;
+                    var ignoreFocus = System.Enum.Parse(enumType, "IgnoreFocus");
+                    bgBehaviorProp.SetValue(settings, ignoreFocus);
+                }
+            }
+            catch (System.Exception) { }
+        }
+
         private void Update()
         {
+            // 1. Process new commands from the queue
             int processed = 0;
             while (CommandQueue.TryDequeue(out var cmd) && processed < 100)
             {
                 ProcessCommand(cmd);
                 processed++;
+            }
+
+            // 2. Re-apply persistent state every frame via QueueStateEvent
+            if (_newInputSystemAvailable)
+            {
+                ReApplyKeyboardState();
+                ReApplyMouseState();
             }
         }
 
@@ -58,102 +167,186 @@ namespace MCPForUnity.Runtime.Input
             switch (cmd.Type)
             {
                 case InputCommandType.KeyDown:
-                    _keyStates[cmd.KeyCode] = true;
+                    _keyStates[(int)cmd.KeyCode] = true;
                     break;
-
                 case InputCommandType.KeyUp:
-                    _keyStates[cmd.KeyCode] = false;
+                    _keyStates[(int)cmd.KeyCode] = false;
                     break;
-
                 case InputCommandType.MouseMove:
-                    VirtualMousePosition = cmd.Position;
+                    _mousePosition = cmd.Position;
+                    _mousePositionSet = true;
                     break;
-
                 case InputCommandType.MouseButtonDown:
                     if (cmd.MouseButton >= 0 && cmd.MouseButton < 3)
                         _mouseButtonStates[cmd.MouseButton] = true;
                     break;
-
                 case InputCommandType.MouseButtonUp:
                     if (cmd.MouseButton >= 0 && cmd.MouseButton < 3)
                         _mouseButtonStates[cmd.MouseButton] = false;
                     break;
-
                 case InputCommandType.MouseScroll:
-                    // Legacy Input doesn't support scroll injection
-                    break;
-
-                case InputCommandType.TouchBegin:
-                case InputCommandType.TouchMove:
-                case InputCommandType.TouchEnd:
-                    ProcessTouch(cmd);
+                    _scrollDelta = new Vector2(0, cmd.ScrollDelta * 120f);
+                    _scrollPending = true;
                     break;
             }
         }
 
-        private static System.Reflection.MethodInfo _simulateTouchMethod;
-        private static bool _simulateTouchResolved;
-
-        private void ProcessTouch(InputCommand cmd)
+        private void ReApplyKeyboardState()
         {
-            // Use reflection to call Input.SimulateTouch — it exists in some Unity versions
-            // but was removed in Unity 6. Reflection avoids compile errors on any version.
+            // Only re-queue if any keys are held
+            bool anyPressed = false;
+            foreach (var kvp in _keyStates)
+                if (kvp.Value) { anyPressed = true; break; }
+
+            if (!anyPressed) return;
+
+            var keyboard = _keyboardCurrentProp?.GetValue(null);
+            if (keyboard == null) return;
+
             try
             {
-                if (!_simulateTouchResolved)
+                var state = System.Activator.CreateInstance(_keyboardStateType);
+
+                foreach (var kvp in _keyStates)
                 {
-                    _simulateTouchResolved = true;
-                    _simulateTouchMethod = typeof(UnityEngine.Input).GetMethod(
-                        "SimulateTouch",
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
-                        null,
-                        new System.Type[] { typeof(UnityEngine.Touch) },
-                        null);
+                    if (!kvp.Value) continue;
+                    // Map KeyCode int to Key enum
+                    var keyEnumValue = KeyCodeToInputSystemKey(kvp.Key);
+                    if (keyEnumValue != null)
+                        _keyboardStateSetMethod.Invoke(state, new[] { keyEnumValue, (object)true });
                 }
 
-                if (_simulateTouchMethod == null)
-                    return; // SimulateTouch not available in this Unity version
-
-                var touch = new UnityEngine.Touch
-                {
-                    fingerId = cmd.TouchFingerId,
-                    position = cmd.Position,
-                    rawPosition = cmd.Position,
-                    deltaPosition = Vector2.zero,
-                    deltaTime = Time.deltaTime,
-                    tapCount = 1,
-                    type = TouchType.Direct
-                };
-
-                switch (cmd.Type)
-                {
-                    case InputCommandType.TouchBegin:
-                        touch.phase = TouchPhase.Began;
-                        break;
-                    case InputCommandType.TouchMove:
-                        touch.phase = TouchPhase.Moved;
-                        break;
-                    case InputCommandType.TouchEnd:
-                        touch.phase = TouchPhase.Ended;
-                        break;
-                }
-
-                _simulateTouchMethod.Invoke(null, new object[] { touch });
+                var genericQueue = _queueStateEventMethod.MakeGenericMethod(_keyboardStateType);
+                genericQueue.Invoke(null, new[] { keyboard, state, (object)(-1.0) });
             }
-            catch (System.Exception)
-            {
-                // Silently fail — touch simulation via legacy Input is best-effort
-            }
+            catch (System.Exception) { }
         }
 
-        /// <summary>Check if a virtual key is currently "pressed" in the bridge.</summary>
-        public static bool IsKeyDown(KeyCode key)
+        private void ReApplyMouseState()
         {
-            return _keyStates.TryGetValue(key, out var pressed) && pressed;
+            bool anyButton = _mouseButtonStates[0] || _mouseButtonStates[1] || _mouseButtonStates[2];
+            if (!anyButton && !_mousePositionSet && !_scrollPending) return;
+
+            var mouse = _mouseCurrentProp?.GetValue(null);
+            if (mouse == null) return;
+
+            try
+            {
+                var state = System.Activator.CreateInstance(_mouseStateType);
+
+                if (_mousePositionSet && _mousePositionField != null)
+                    _mousePositionField.SetValue(state, _mousePosition);
+
+                if (_scrollPending && _mouseScrollField != null)
+                {
+                    _mouseScrollField.SetValue(state, _scrollDelta);
+                    _scrollPending = false; // scroll is one-shot
+                }
+
+                if (_mouseStateWithButtonMethod != null)
+                {
+                    for (int i = 0; i < 3; i++)
+                    {
+                        if (_mouseButtonStates[i])
+                        {
+                            var mbValue = System.Enum.ToObject(_mouseButtonEnum, i);
+                            state = _mouseStateWithButtonMethod.Invoke(state, new[] { mbValue, (object)true });
+                        }
+                    }
+                }
+
+                var genericQueue = _queueStateEventMethod.MakeGenericMethod(_mouseStateType);
+                genericQueue.Invoke(null, new[] { mouse, state, (object)(-1.0) });
+            }
+            catch (System.Exception) { }
         }
 
-        /// <summary>Check if a virtual mouse button is currently "pressed" in the bridge.</summary>
-        public static bool IsMouseButtonDown(int button)
+        // --- KeyCode to Input System Key mapping ---
+
+        private static Dictionary<int, object> _keyCodeToKeyMap;
+
+        private static object KeyCodeToInputSystemKey(int keyCodeInt)
+        {
+            if (_keyCodeToKeyMap == null)
+                BuildKeyCodeMap();
+            _keyCodeToKeyMap.TryGetValue(keyCodeInt, out var result);
+            return result;
+        }
+
+        private static void BuildKeyCodeMap()
+        {
+            _keyCodeToKeyMap = new Dictionary<int, object>();
+            if (_keyEnum == null) return;
+
+            // Build reverse map from Key enum names
+            var keyValues = new Dictionary<string, object>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var val in System.Enum.GetValues(_keyEnum))
+                keyValues[System.Enum.GetName(_keyEnum, val)] = val;
+
+            void Map(KeyCode kc, string keyName)
+            {
+                if (keyValues.TryGetValue(keyName, out var v))
+                    _keyCodeToKeyMap[(int)kc] = v;
+            }
+
+            // Letters
+            for (char c = 'a'; c <= 'z'; c++)
+                Map((KeyCode)c, c.ToString().ToUpper());
+
+            // Digits
+            for (int i = 0; i <= 9; i++)
+                Map(KeyCode.Alpha0 + i, $"Digit{i}");
+
+            // Numpad
+            for (int i = 0; i <= 9; i++)
+                Map(KeyCode.Keypad0 + i, $"Numpad{i}");
+
+            // Arrows
+            Map(KeyCode.UpArrow, "UpArrow");
+            Map(KeyCode.DownArrow, "DownArrow");
+            Map(KeyCode.LeftArrow, "LeftArrow");
+            Map(KeyCode.RightArrow, "RightArrow");
+
+            // Function keys
+            for (int i = 1; i <= 12; i++)
+                Map(KeyCode.F1 + (i - 1), $"F{i}");
+
+            // Special
+            Map(KeyCode.Space, "Space");
+            Map(KeyCode.Return, "Enter");
+            Map(KeyCode.Escape, "Escape");
+            Map(KeyCode.Tab, "Tab");
+            Map(KeyCode.Backspace, "Backspace");
+            Map(KeyCode.Delete, "Delete");
+            Map(KeyCode.LeftShift, "LeftShift");
+            Map(KeyCode.RightShift, "RightShift");
+            Map(KeyCode.LeftControl, "LeftCtrl");
+            Map(KeyCode.RightControl, "RightCtrl");
+            Map(KeyCode.LeftAlt, "LeftAlt");
+            Map(KeyCode.RightAlt, "RightAlt");
+            Map(KeyCode.Period, "Period");
+            Map(KeyCode.Comma, "Comma");
+            Map(KeyCode.Semicolon, "Semicolon");
+            Map(KeyCode.Slash, "Slash");
+            Map(KeyCode.Minus, "Minus");
+            Map(KeyCode.Equals, "Equals");
+            Map(KeyCode.LeftBracket, "LeftBracket");
+            Map(KeyCode.RightBracket, "RightBracket");
+            Map(KeyCode.Insert, "Insert");
+            Map(KeyCode.Home, "Home");
+            Map(KeyCode.End, "End");
+            Map(KeyCode.PageUp, "PageUp");
+            Map(KeyCode.PageDown, "PageDown");
+        }
+
+        // --- Public API ---
+
+        public static bool IsKeyHeld(KeyCode key)
+        {
+            return _keyStates.TryGetValue((int)key, out var pressed) && pressed;
+        }
+
+        public static bool IsMouseButtonHeld(int button)
         {
             return button >= 0 && button < 3 && _mouseButtonStates[button];
         }
@@ -164,7 +357,10 @@ namespace MCPForUnity.Runtime.Input
             _mouseButtonStates[0] = false;
             _mouseButtonStates[1] = false;
             _mouseButtonStates[2] = false;
-            VirtualMousePosition = Vector2.zero;
+            _mousePosition = Vector2.zero;
+            _mousePositionSet = false;
+            _scrollDelta = Vector2.zero;
+            _scrollPending = false;
             while (CommandQueue.TryDequeue(out _)) { }
         }
     }

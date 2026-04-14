@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using MCPForUnity.Editor.Helpers;
+using MCPForUnity.Runtime.Input;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
@@ -235,6 +236,40 @@ namespace MCPForUnity.Editor.Tools.Input
             _keyNameMap = null;
         }
 
+        // --- Key name to KeyCode mapping for bridge ---
+
+        private static Dictionary<string, KeyCode> _keyNameToKeyCode;
+
+        private static void BuildKeyNameToKeyCodeMap()
+        {
+            _keyNameToKeyCode = new Dictionary<string, KeyCode>(StringComparer.OrdinalIgnoreCase);
+            foreach (KeyCode kc in Enum.GetValues(typeof(KeyCode)))
+                _keyNameToKeyCode[kc.ToString()] = kc;
+
+            // Common aliases
+            _keyNameToKeyCode["ctrl"] = KeyCode.LeftControl;
+            _keyNameToKeyCode["shift"] = KeyCode.LeftShift;
+            _keyNameToKeyCode["alt"] = KeyCode.LeftAlt;
+            _keyNameToKeyCode["enter"] = KeyCode.Return;
+            _keyNameToKeyCode["esc"] = KeyCode.Escape;
+            _keyNameToKeyCode["del"] = KeyCode.Delete;
+            _keyNameToKeyCode["up"] = KeyCode.UpArrow;
+            _keyNameToKeyCode["down"] = KeyCode.DownArrow;
+            _keyNameToKeyCode["left"] = KeyCode.LeftArrow;
+            _keyNameToKeyCode["right"] = KeyCode.RightArrow;
+
+            for (char c = 'A'; c <= 'Z'; c++)
+                _keyNameToKeyCode[c.ToString()] = (KeyCode)System.Char.ToLower(c);
+            for (char c = '0'; c <= '9'; c++)
+                _keyNameToKeyCode[c.ToString()] = (KeyCode)((int)KeyCode.Alpha0 + (c - '0'));
+        }
+
+        private static bool TryGetKeyCode(string keyName, out KeyCode keyCode)
+        {
+            if (_keyNameToKeyCode == null) BuildKeyNameToKeyCodeMap();
+            return _keyNameToKeyCode.TryGetValue(keyName, out keyCode);
+        }
+
         // --- Keyboard ---
 
         public static object KeyDown(string keyName)
@@ -242,14 +277,24 @@ namespace MCPForUnity.Editor.Tools.Input
             if (!EnsureResolved() || !_available)
                 return new ErrorResponse("New Input System not available.");
 
-            var keyboard = _keyboardCurrentProp.GetValue(null);
-            if (keyboard == null)
-                return new ErrorResponse("No keyboard device is currently active.");
-
-            if (!_keyNameMap.TryGetValue(keyName, out var keyEnumValue))
+            if (!_keyNameMap.ContainsKey(keyName))
                 return new ErrorResponse($"Unknown key '{keyName}'. Available keys include: {string.Join(", ", _keyNameMap.Keys.Take(30))}...");
 
-            return SetKeyState(keyboard, keyEnumValue, true);
+            if (!TryGetKeyCode(keyName, out var keyCode))
+                return new ErrorResponse($"Could not map key '{keyName}' to KeyCode.");
+
+            // Route through bridge command queue — bridge re-queues state every frame
+            MCPInputBridge.CommandQueue.Enqueue(new InputCommand
+            {
+                Type = InputCommandType.KeyDown,
+                KeyCode = keyCode
+            });
+
+            return new SuccessResponse($"Key pressed successfully.", new
+            {
+                key = keyName,
+                state = "down"
+            });
         }
 
         public static object KeyUp(string keyName)
@@ -257,14 +302,23 @@ namespace MCPForUnity.Editor.Tools.Input
             if (!EnsureResolved() || !_available)
                 return new ErrorResponse("New Input System not available.");
 
-            var keyboard = _keyboardCurrentProp.GetValue(null);
-            if (keyboard == null)
-                return new ErrorResponse("No keyboard device is currently active.");
-
-            if (!_keyNameMap.TryGetValue(keyName, out var keyEnumValue))
+            if (!_keyNameMap.ContainsKey(keyName))
                 return new ErrorResponse($"Unknown key '{keyName}'.");
 
-            return SetKeyState(keyboard, keyEnumValue, false);
+            if (!TryGetKeyCode(keyName, out var keyCode))
+                return new ErrorResponse($"Could not map key '{keyName}' to KeyCode.");
+
+            MCPInputBridge.CommandQueue.Enqueue(new InputCommand
+            {
+                Type = InputCommandType.KeyUp,
+                KeyCode = keyCode
+            });
+
+            return new SuccessResponse($"Key released successfully.", new
+            {
+                key = keyName,
+                state = "up"
+            });
         }
 
         public static object KeyPress(string keyName, float duration)
@@ -327,37 +381,16 @@ namespace MCPForUnity.Editor.Tools.Input
 
         public static object MouseMove(Vector2 position)
         {
-            if (!EnsureResolved() || !_available)
-                return new ErrorResponse("New Input System not available.");
-
-            var mouse = _mouseCurrentProp.GetValue(null);
-            if (mouse == null)
-                return new ErrorResponse("No mouse device is currently active.");
-
-            try
+            MCPInputBridge.CommandQueue.Enqueue(new InputCommand
             {
-                // Use QueueStateEvent with MouseState to set position
-                if (_mouseStateType == null || _queueStateEventMethod == null)
-                    return new ErrorResponse("Could not resolve MouseState via reflection.");
+                Type = InputCommandType.MouseMove,
+                Position = position
+            });
 
-                var state = Activator.CreateInstance(_mouseStateType);
-                // Set position field directly
-                var posField = _mouseStateType.GetField("position");
-                if (posField != null)
-                    posField.SetValue(state, position);
-
-                var genericQueue = _queueStateEventMethod.MakeGenericMethod(_mouseStateType);
-                genericQueue.Invoke(null, new[] { mouse, state, (object)(-1.0) });
-
-                return new SuccessResponse($"Mouse moved to ({position.x}, {position.y}).", new
-                {
-                    position = new[] { position.x, position.y }
-                });
-            }
-            catch (Exception e)
+            return new SuccessResponse($"Mouse moved to ({position.x}, {position.y}).", new
             {
-                return new ErrorResponse($"Failed to move mouse: {e.InnerException?.Message ?? e.Message}");
-            }
+                position = new[] { position.x, position.y }
+            });
         }
 
         public static object MouseButtonDown(int button)
@@ -411,73 +444,30 @@ namespace MCPForUnity.Editor.Tools.Input
 
         private static object SetMouseButton(int button, bool pressed)
         {
-            if (!EnsureResolved() || !_available)
-                return new ErrorResponse("New Input System not available.");
-
-            var mouse = _mouseCurrentProp.GetValue(null);
-            if (mouse == null)
-                return new ErrorResponse("No mouse device is currently active.");
-
-            try
+            MCPInputBridge.CommandQueue.Enqueue(new InputCommand
             {
-                // Mouse buttons are bitfield controls — must use QueueStateEvent with MouseState
-                if (_mouseStateType == null || _mouseStateWithButtonMethod == null || _queueStateEventMethod == null)
-                    return new ErrorResponse("Could not resolve MouseState or QueueStateEvent via reflection.");
+                Type = pressed ? InputCommandType.MouseButtonDown : InputCommandType.MouseButtonUp,
+                MouseButton = button
+            });
 
-                // Map button index to MouseButton enum value (Left=0, Right=1, Middle=2)
-                object mouseButtonValue = Enum.ToObject(_mouseButtonEnum, button);
-
-                // Create MouseState and set the button
-                var state = Activator.CreateInstance(_mouseStateType);
-                state = _mouseStateWithButtonMethod.Invoke(state, new[] { mouseButtonValue, (object)pressed });
-
-                // Queue the state event
-                var genericQueue = _queueStateEventMethod.MakeGenericMethod(_mouseStateType);
-                genericQueue.Invoke(null, new[] { mouse, state, (object)(-1.0) });
-
-                string[] names = { "left", "right", "middle" };
-                return new SuccessResponse($"Mouse {names[button]} button {(pressed ? "pressed" : "released")}.", new
-                {
-                    button,
-                    button_name = names[button],
-                    state = pressed ? "down" : "up"
-                });
-            }
-            catch (Exception e)
+            string[] names = { "left", "right", "middle" };
+            return new SuccessResponse($"Mouse {names[button]} button {(pressed ? "pressed" : "released")}.", new
             {
-                return new ErrorResponse($"Failed to set mouse button: {e.InnerException?.Message ?? e.Message}");
-            }
+                button,
+                button_name = names[button],
+                state = pressed ? "down" : "up"
+            });
         }
 
         public static object MouseScroll(float delta)
         {
-            if (!EnsureResolved() || !_available)
-                return new ErrorResponse("New Input System not available.");
-
-            var mouse = _mouseCurrentProp.GetValue(null);
-            if (mouse == null)
-                return new ErrorResponse("No mouse device is currently active.");
-
-            try
+            MCPInputBridge.CommandQueue.Enqueue(new InputCommand
             {
-                var scrollProp = _mouseType.GetProperty("scroll");
-                if (scrollProp == null)
-                    return new ErrorResponse("Could not find mouse.scroll property.");
+                Type = InputCommandType.MouseScroll,
+                ScrollDelta = delta
+            });
 
-                var scrollControl = scrollProp.GetValue(mouse);
-                var scrollValue = new Vector2(0, delta * 120f); // Unity scroll units
-
-                if (_inputStateChangeMethod != null)
-                {
-                    InvokeStateChange(scrollControl, scrollValue, typeof(Vector2));
-                }
-
-                return new SuccessResponse($"Mouse scrolled by {delta}.", new { scroll_delta = delta });
-            }
-            catch (Exception e)
-            {
-                return new ErrorResponse($"Failed to scroll: {e.InnerException?.Message ?? e.Message}");
-            }
+            return new SuccessResponse($"Mouse scrolled by {delta}.", new { scroll_delta = delta });
         }
 
         // --- Touch ---
