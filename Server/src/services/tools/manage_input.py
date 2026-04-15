@@ -16,10 +16,12 @@ GAMEPAD_ACTIONS = ["gamepad_button", "gamepad_axis"]
 UI_ACTIONS = ["click_ui"]
 QUERY_ACTIONS = ["get_input_state", "get_status"]
 SEQUENCE_ACTIONS = ["send_sequence", "get_sequence_status"]
+NAVIGATION_ACTIONS = ["move_to", "query_surroundings", "wait_turns"]
 
 ALL_ACTIONS = (
     KEYBOARD_ACTIONS + MOUSE_ACTIONS + TOUCH_ACTIONS +
-    GAMEPAD_ACTIONS + UI_ACTIONS + QUERY_ACTIONS + SEQUENCE_ACTIONS
+    GAMEPAD_ACTIONS + UI_ACTIONS + QUERY_ACTIONS + SEQUENCE_ACTIONS +
+    NAVIGATION_ACTIONS
 )
 
 
@@ -31,7 +33,10 @@ ALL_ACTIONS = (
         "Best with New Input System package (com.unity.inputsystem); limited legacy Input support. "
         "Actions: key_down, key_up, key_press, mouse_move, mouse_button_down, mouse_button_up, "
         "mouse_click, mouse_scroll, touch, gamepad_button, gamepad_axis, click_ui, "
-        "get_input_state, get_status, send_sequence, get_sequence_status."
+        "get_input_state, get_status, send_sequence, get_sequence_status, "
+        "move_to, query_surroundings, wait_turns. "
+        "Navigation actions (move_to, query_surroundings, wait_turns) use BFS pathfinding "
+        "and game state queries for MCP automation — they are not used during normal gameplay."
     ),
     annotations=ToolAnnotations(
         title="Manage Input",
@@ -101,6 +106,31 @@ async def manage_input(
         Optional[int],
         "Seconds to wait for sequence completion in get_sequence_status.",
     ] = None,
+    # Navigation params (MCP-only — not used during normal gameplay)
+    target: Annotated[
+        Optional[str],
+        "Entity name for move_to (e.g., 'chest', 'elder', 'dagger'). Pathfinds to adjacent cell.",
+    ] = None,
+    x: Annotated[
+        Optional[int],
+        "Target X coordinate for move_to.",
+    ] = None,
+    y: Annotated[
+        Optional[int],
+        "Target Y coordinate for move_to.",
+    ] = None,
+    max_steps: Annotated[
+        Optional[int],
+        "Maximum steps for move_to pathfinding (default 50).",
+    ] = None,
+    radius: Annotated[
+        Optional[int],
+        "Search radius for query_surroundings (default 8).",
+    ] = None,
+    count: Annotated[
+        Optional[int],
+        "Number of turns for wait_turns (default 1).",
+    ] = None,
 ) -> dict[str, Any]:
     """Simulate gameplay input during Play Mode."""
 
@@ -117,6 +147,9 @@ async def manage_input(
             "click_": UI_ACTIONS,
             "get_": QUERY_ACTIONS,
             "send_": SEQUENCE_ACTIONS,
+            "move_": NAVIGATION_ACTIONS,
+            "query_": NAVIGATION_ACTIONS,
+            "wait_": NAVIGATION_ACTIONS,
         }
         suggestions = available_by_prefix.get(prefix, [])
         if suggestions:
@@ -165,6 +198,19 @@ async def manage_input(
         params_dict["sequence"] = sequence
     if job_id is not None:
         params_dict["job_id"] = job_id
+    # Navigation params
+    if target is not None:
+        params_dict["target"] = target
+    if x is not None:
+        params_dict["x"] = x
+    if y is not None:
+        params_dict["y"] = y
+    if max_steps is not None:
+        params_dict["max_steps"] = max_steps
+    if radius is not None:
+        params_dict["radius"] = radius
+    if count is not None:
+        params_dict["count"] = count
 
     params_dict = {k: v for k, v in params_dict.items() if v is not None}
 

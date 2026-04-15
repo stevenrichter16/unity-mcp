@@ -59,7 +59,8 @@ namespace MCPForUnity.Editor.Tools.Input
             "gamepad_button", "gamepad_axis",
             "click_ui",
             "get_input_state", "get_status",
-            "send_sequence", "get_sequence_status"
+            "send_sequence", "get_sequence_status",
+            "move_to", "query_surroundings", "wait_turns"
         };
 
         public static object HandleCommand(JObject @params)
@@ -152,6 +153,14 @@ namespace MCPForUnity.Editor.Tools.Input
                     return InputSequenceRunner.StartSequence(@params);
                 case "get_sequence_status":
                     return InputSequenceRunner.GetStatus(p);
+
+                // Navigation (MCP-only — not used during normal gameplay)
+                case "move_to":
+                    return GameplayNavigator.MoveTo(p);
+                case "query_surroundings":
+                    return GameplayNavigator.QuerySurroundings(p);
+                case "wait_turns":
+                    return GameplayNavigator.WaitTurns(p);
 
                 default:
                     return new ErrorResponse($"Action '{action}' is recognized but not yet implemented.");

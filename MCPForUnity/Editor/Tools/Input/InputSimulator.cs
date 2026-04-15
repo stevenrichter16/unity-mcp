@@ -323,29 +323,51 @@ namespace MCPForUnity.Editor.Tools.Input
 
         public static object KeyPress(string keyName, float duration)
         {
-            var downResult = KeyDown(keyName);
-            if (downResult is ErrorResponse)
-                return downResult;
+            if (!EnsureResolved() || !_available)
+                return new ErrorResponse("New Input System not available.");
 
-            // Schedule key_up after duration using EditorApplication.delayCall
-            var capturedKey = keyName;
-            double targetTime = EditorApplication.timeSinceStartup + duration;
+            if (!_keyNameMap.ContainsKey(keyName))
+                return new ErrorResponse($"Unknown key '{keyName}'.");
 
-            void CheckAndRelease()
+            if (!TryGetKeyCode(keyName, out var keyCode))
+                return new ErrorResponse($"Could not map key '{keyName}' to KeyCode.");
+
+            if (duration <= 0.05f)
             {
-                if (EditorApplication.timeSinceStartup >= targetTime)
+                // Single-frame tap — press and auto-release after 1 frame
+                MCPInputBridge.CommandQueue.Enqueue(new InputCommand
                 {
-                    KeyUp(capturedKey);
-                }
-                else
+                    Type = InputCommandType.KeyTap,
+                    KeyCode = keyCode
+                });
+                return new SuccessResponse($"Key '{keyName}' tapped (1 frame).", new
                 {
-                    EditorApplication.delayCall += CheckAndRelease;
-                }
+                    key = keyName,
+                    mode = "tap"
+                });
             }
+            else
+            {
+                // Hold for duration then release
+                var downResult = KeyDown(keyName);
+                if (downResult is ErrorResponse)
+                    return downResult;
 
-            EditorApplication.delayCall += CheckAndRelease;
+                var capturedKey = keyName;
+                double targetTime = EditorApplication.timeSinceStartup + duration;
 
-            return new SuccessResponse($"Key '{keyName}' pressed. Will release after {duration}s.");
+                void CheckAndRelease()
+                {
+                    if (EditorApplication.timeSinceStartup >= targetTime)
+                        KeyUp(capturedKey);
+                    else
+                        EditorApplication.delayCall += CheckAndRelease;
+                }
+
+                EditorApplication.delayCall += CheckAndRelease;
+
+                return new SuccessResponse($"Key '{keyName}' pressed. Will release after {duration}s.");
+            }
         }
 
         private static object SetKeyState(object keyboard, object keyEnumValue, bool pressed)

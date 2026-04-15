@@ -19,6 +19,9 @@ namespace MCPForUnity.Runtime.Input
 
         // Persistent virtual state — survives across frames
         private static readonly ConcurrentDictionary<int, bool> _keyStates = new ConcurrentDictionary<int, bool>();
+        // Keys/buttons that should auto-release after one frame
+        private static readonly ConcurrentDictionary<int, bool> _keyTaps = new ConcurrentDictionary<int, bool>();
+        private static readonly bool[] _mouseTaps = new bool[3];
         private static readonly bool[] _mouseButtonStates = new bool[3];
         private static Vector2 _mousePosition;
         private static bool _mousePositionSet;
@@ -160,6 +163,22 @@ namespace MCPForUnity.Runtime.Input
                 ReApplyKeyboardState();
                 ReApplyMouseState();
             }
+
+            // 3. Auto-release tapped keys/buttons after this frame
+            foreach (var kvp in _keyTaps)
+            {
+                _keyStates[kvp.Key] = false;
+            }
+            _keyTaps.Clear();
+
+            for (int i = 0; i < 3; i++)
+            {
+                if (_mouseTaps[i])
+                {
+                    _mouseButtonStates[i] = false;
+                    _mouseTaps[i] = false;
+                }
+            }
         }
 
         private void ProcessCommand(InputCommand cmd)
@@ -171,6 +190,11 @@ namespace MCPForUnity.Runtime.Input
                     break;
                 case InputCommandType.KeyUp:
                     _keyStates[(int)cmd.KeyCode] = false;
+                    _keyTaps.TryRemove((int)cmd.KeyCode, out _);
+                    break;
+                case InputCommandType.KeyTap:
+                    _keyStates[(int)cmd.KeyCode] = true;
+                    _keyTaps[(int)cmd.KeyCode] = true;
                     break;
                 case InputCommandType.MouseMove:
                     _mousePosition = cmd.Position;
@@ -182,7 +206,17 @@ namespace MCPForUnity.Runtime.Input
                     break;
                 case InputCommandType.MouseButtonUp:
                     if (cmd.MouseButton >= 0 && cmd.MouseButton < 3)
+                    {
                         _mouseButtonStates[cmd.MouseButton] = false;
+                        _mouseTaps[cmd.MouseButton] = false;
+                    }
+                    break;
+                case InputCommandType.MouseTap:
+                    if (cmd.MouseButton >= 0 && cmd.MouseButton < 3)
+                    {
+                        _mouseButtonStates[cmd.MouseButton] = true;
+                        _mouseTaps[cmd.MouseButton] = true;
+                    }
                     break;
                 case InputCommandType.MouseScroll:
                     _scrollDelta = new Vector2(0, cmd.ScrollDelta * 120f);
@@ -369,9 +403,13 @@ namespace MCPForUnity.Runtime.Input
     {
         KeyDown,
         KeyUp,
+        /// <summary>Press and release after exactly 1 frame. For turn-based games.</summary>
+        KeyTap,
         MouseMove,
         MouseButtonDown,
         MouseButtonUp,
+        /// <summary>Click and release after exactly 1 frame.</summary>
+        MouseTap,
         MouseScroll,
         TouchBegin,
         TouchMove,

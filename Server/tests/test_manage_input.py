@@ -333,5 +333,89 @@ def test_all_actions_list_is_complete():
         "click_ui",
         "get_input_state", "get_status",
         "send_sequence", "get_sequence_status",
+        "move_to", "query_surroundings", "wait_turns",
     }
     assert set(ALL_ACTIONS) == expected
+
+
+# --- Navigation actions ---
+
+def test_move_to_by_name(monkeypatch):
+    captured = _make_mocks(monkeypatch)
+    result = asyncio.run(
+        manage_input(
+            SimpleNamespace(),
+            action="move_to",
+            target="chest",
+        )
+    )
+    assert result["success"] is True
+    assert captured["params"]["target"] == "chest"
+    assert captured["params"]["action"] == "move_to"
+
+
+def test_move_to_by_coords(monkeypatch):
+    captured = _make_mocks(monkeypatch)
+    result = asyncio.run(
+        manage_input(
+            SimpleNamespace(),
+            action="move_to",
+            x=43,
+            y=11,
+        )
+    )
+    assert result["success"] is True
+    assert captured["params"]["x"] == 43
+    assert captured["params"]["y"] == 11
+
+
+def test_move_to_with_max_steps(monkeypatch):
+    captured = _make_mocks(monkeypatch)
+    result = asyncio.run(
+        manage_input(
+            SimpleNamespace(),
+            action="move_to",
+            target="elder",
+            max_steps=10,
+        )
+    )
+    assert result["success"] is True
+    assert captured["params"]["max_steps"] == 10
+
+
+def test_query_surroundings(monkeypatch):
+    captured = _make_mocks(monkeypatch)
+    result = asyncio.run(
+        manage_input(
+            SimpleNamespace(),
+            action="query_surroundings",
+            radius=5,
+        )
+    )
+    assert result["success"] is True
+    assert captured["params"]["radius"] == 5
+
+
+def test_query_surroundings_default(monkeypatch):
+    captured = _make_mocks(monkeypatch)
+    result = asyncio.run(
+        manage_input(
+            SimpleNamespace(),
+            action="query_surroundings",
+        )
+    )
+    assert result["success"] is True
+    assert "radius" not in captured["params"]
+
+
+def test_wait_turns(monkeypatch):
+    captured = _make_mocks(monkeypatch)
+    result = asyncio.run(
+        manage_input(
+            SimpleNamespace(),
+            action="wait_turns",
+            count=5,
+        )
+    )
+    assert result["success"] is True
+    assert captured["params"]["count"] == 5
