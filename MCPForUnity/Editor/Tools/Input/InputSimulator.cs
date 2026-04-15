@@ -261,7 +261,14 @@ namespace MCPForUnity.Editor.Tools.Input
             for (char c = 'A'; c <= 'Z'; c++)
                 _keyNameToKeyCode[c.ToString()] = (KeyCode)System.Char.ToLower(c);
             for (char c = '0'; c <= '9'; c++)
+            {
                 _keyNameToKeyCode[c.ToString()] = (KeyCode)((int)KeyCode.Alpha0 + (c - '0'));
+                // Input System uses "Digit0"-"Digit9" names
+                _keyNameToKeyCode["Digit" + c] = (KeyCode)((int)KeyCode.Alpha0 + (c - '0'));
+            }
+            // Numpad aliases
+            for (int i = 0; i <= 9; i++)
+                _keyNameToKeyCode["Numpad" + i] = (KeyCode)((int)KeyCode.Keypad0 + i);
         }
 
         private static bool TryGetKeyCode(string keyName, out KeyCode keyCode)
