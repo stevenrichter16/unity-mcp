@@ -96,8 +96,19 @@ class PluginHub(WebSocketEndpoint):
     COMMAND_TIMEOUT = 30
     # Server-side ping interval (seconds) - how often to send pings to Unity
     PING_INTERVAL = 10
-    # Max time (seconds) to wait for pong before considering connection dead
-    PING_TIMEOUT = 20
+    # Max time (seconds) to wait for pong before considering connection dead.
+    # Set generously above Unity's typical busy windows: full assembly compile
+    # + domain reload (~10-30s on this project), EditMode test runs (~5-20s),
+    # asset import bursts after large file changes (~30-60s). With the prior
+    # 20s ceiling, every test sweep / recompile would race the timeout — Unity's
+    # main thread starves the async pong handler, server closes the connection,
+    # plugin reconnects, repeat. Sustained reconnect storm presented to the
+    # user as the macOS spinning beachball + tools timing out.
+    #
+    # 90s gives Unity room to finish a worst-case compile + reload cycle before
+    # the server treats the connection as dead. This is still well under the
+    # FastMCP HTTP request timeout, so external callers don't notice the change.
+    PING_TIMEOUT = 90
     # Timeout (seconds) for fast-fail commands like ping/read_console/get_editor_state.
     # Keep short so MCP clients aren't blocked during Unity compilation/reload/unfocused throttling.
     FAST_FAIL_TIMEOUT = 2.0
